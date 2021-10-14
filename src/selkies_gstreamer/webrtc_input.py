@@ -14,7 +14,6 @@
 
 from Xlib import X, XK, display, ext
 import base64
-import pynput
 import uinput
 import os
 import msgpack
@@ -26,6 +25,11 @@ import time
 
 import logging
 logger = logging.getLogger("webrtc_input")
+
+try:
+    import pynput
+except Exception as e:
+    logger.warning("unable to import pynput, mouse and keyboard inputs may not work: %s" % e)
 
 JS_BTNS = (
     uinput.BTN_GAMEPAD,
@@ -64,22 +68,6 @@ MOUSE_BUTTON_LEFT = 41
 MOUSE_BUTTON_MIDDLE = 42
 MOUSE_BUTTON_RIGHT = 43
 
-# Local map for uinput and pynput buttons
-MOUSE_BUTTON_MAP = {
-    MOUSE_BUTTON_LEFT: {
-        "uinput": uinput.BTN_LEFT,
-        "pynput": pynput.mouse.Button.left,
-    },
-    MOUSE_BUTTON_MIDDLE: {
-        "uinput": uinput.BTN_MIDDLE,
-        "pynput": pynput.mouse.Button.middle,
-    },
-    MOUSE_BUTTON_RIGHT: {
-        "uinput": uinput.BTN_RIGHT,
-        "pynput": pynput.mouse.Button.right,
-    },
-}
-
 class WebRTCInputError(Exception):
     pass
 
@@ -99,6 +87,7 @@ class WebRTCInput:
 
         self.keyboard = None
         self.mouse = None
+        self.mouse_button_map = {}
         self.joystick = None
         self.xdisplay = None
         self.button_mask = 0
@@ -136,6 +125,22 @@ class WebRTCInput:
             # Proxy uinput mouse commands through unix domain socket.
             logger.info("Connecting to uinput mouse socket: %s" % self.uinput_mouse_socket_path)
             self.uinput_mouse_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+
+        # Local map for uinput and pynput buttons
+        self.mouse_button_map = {
+            MOUSE_BUTTON_LEFT: {
+                "uinput": uinput.BTN_LEFT,
+                "pynput": pynput.mouse.Button.left,
+            },
+            MOUSE_BUTTON_MIDDLE: {
+                "uinput": uinput.BTN_MIDDLE,
+                "pynput": pynput.mouse.Button.middle,
+            },
+            MOUSE_BUTTON_RIGHT: {
+                "uinput": uinput.BTN_RIGHT,
+                "pynput": pynput.mouse.Button.right,
+            },
+        }
 
         self.mouse = pynput.mouse.Controller()
 

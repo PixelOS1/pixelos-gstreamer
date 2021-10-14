@@ -5,7 +5,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Verify gstreamer installation
 retry = True
-while retry:
+while retry and os.environ.get("WEBRTC_SERVER_ONLY", "false").lower() == "false":
     try:
         import gi
         gi.require_version("Gst", "1.0")

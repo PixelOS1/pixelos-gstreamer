@@ -248,14 +248,28 @@ def main():
                         default=os.environ.get(
                             'JSON_CONFIG', '/var/run/appconfig/streaming_args.json'),
                         help='Path to JSON file containing argument key-value pairs that are overlayed with cli args/env.')
+    parser.add_argument('--server_only',
+                        default=os.environ.get('WEBRTC_SERVER_ONLY', 'false'),
+                        help='only start the signlaing and web server. Use this for external signaling instead of built-in.')
+    parser.add_argument('--enable_signal_server',
+                        default=os.environ.get('ENABLE_SIGNAL_SERVER', 'true'),
+                        help='Use built-in signal and web server, default: true')
     parser.add_argument('--addr',
                         default=os.environ.get(
                             'LISTEN_HOST', '0.0.0.0'),
-                        help='Host to listen on for the signaling and web server, default: "0.0.0.0"')
+                        help='Host to listen on for the signaling and web server when ENABLE_SIGNAL_SERVER is true, default: "0.0.0.0"')
     parser.add_argument('--port',
                         default=os.environ.get(
                             'LISTEN_PORT', '8080'),
-                        help='Port to listen on for the signaling and web server, default: "8080"')
+                        help='Port to listen on for the signaling and web server when ENABLE_SIGNAL_SERVER is true, default: "8080"')
+    parser.add_argument('--signal_host',
+                        default=os.environ.get(
+                            'SIGNAL_HOST', '127.0.0.1'),
+                        help='When using external signaling, connect to websocket at this host. Default: 127.0.0.1')
+    parser.add_argument('--signal_port',
+                        default=os.environ.get(
+                            'SIGNAL_PORT', '8080'),
+                        help='When using external signaling, connect to websocket on this port. Default: 8080')
     parser.add_argument('--enable_basic_auth',
                         default=os.environ.get(
                             'ENABLE_BASIC_AUTH', 'false'),
@@ -379,8 +393,12 @@ def main():
     # Initialize metrics server.
     metrics = Metrics(int(args.metrics_port))
 
+    # Parse flag to detect what mode to run in.
+    enable_signal_server = args.enable_signal_server.lower() == "true"
+    server_only = args.server_only.lower() == "true"
+
     # Initialize the signalling client
-    signalling = WebRTCSignalling('ws://127.0.0.1:%s/ws' % args.port, my_id, peer_id,
+    signalling = WebRTCSignalling('ws://%s:%s/ws' % (args.signal_host, args.signal_port), my_id, peer_id,
         enable_basic_auth=args.enable_basic_auth.lower() == 'true',
         basic_auth_user=args.basic_auth_user,
         basic_auth_password=args.basic_auth_password)
@@ -627,24 +645,35 @@ def main():
     rtc_file_mon.on_rtc_config = mon_rtc_config
 
     try:
-        server.run()
-        metrics.start()
-        loop.run_until_complete(webrtc_input.connect())
-        loop.run_in_executor(None, lambda: webrtc_input.start_clipboard())
-        loop.run_in_executor(None, lambda: gpu_mon.start())
-        loop.run_in_executor(None, lambda: hmac_turn_mon.start())
-        loop.run_in_executor(None, lambda: coturn_mon.start())
-        loop.run_in_executor(None, lambda: rtc_file_mon.start())
-        loop.run_in_executor(None, lambda: system_mon.start())
+        if server_only:
+            # Only run the web components.
+            logger.info("Running only web components")
+            server.run()
+            while True:
+                loop.run_until_complete(asyncio.sleep(10))
+        else:
+            if enable_signal_server:
+                logger.info("Starting built-in signaling and web server.")
+                server.run()
 
-        while True:
-            loop.run_until_complete(signalling.connect())
-            loop.run_until_complete(signalling.start())
-            app.stop_pipeline()
+            metrics.start()
+            loop.run_until_complete(webrtc_input.connect())
+            loop.run_in_executor(None, lambda: webrtc_input.start_clipboard())
+            loop.run_in_executor(None, lambda: gpu_mon.start())
+            loop.run_in_executor(None, lambda: hmac_turn_mon.start())
+            loop.run_in_executor(None, lambda: coturn_mon.start())
+            loop.run_in_executor(None, lambda: rtc_file_mon.start())
+            loop.run_in_executor(None, lambda: system_mon.start())
+
+            while True:
+                loop.run_until_complete(signalling.connect())
+                loop.run_until_complete(signalling.start())
+                app.stop_pipeline()
     except Exception as e:
         logger.error("Caught exception: %s" % e)
         sys.exit(1)
     finally:
+        logger.info("Cleaning up...")
         webrtc_input.stop_clipboard()
         webrtc_input.disconnect()
         gpu_mon.stop()
@@ -652,6 +681,7 @@ def main():
         rtc_file_mon.stop()
         system_mon.stop()
         server.server.close()
+        logger.info("Exiting")
         sys.exit(0)
     # [END main_start]
 

@@ -458,6 +458,7 @@ class WebRTCSimpleServer(object):
         logger.info("websocket server started")
         # Stop the server if certificate changes
         #self.loop.run_until_complete(self.check_server_needs_restart())
+        return self.server
 
     async def stop(self):
         logger.info('Stopping server... ', end='')
