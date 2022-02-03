@@ -1,5 +1,6 @@
 # Supported base images: ubuntu:20.04, ubuntu:18.04
 ARG UBUNTU_RELEASE=20.04
+ARG CUDA_VERSION=11.4.2
 ARG GSTREAMER_BASE_IMAGE=ghcr.io/selkies-project/selkies-gstreamer/gstreamer
 ARG GSTREAMER_BASE_IMAGE_RELEASE=latest
 ARG PY_BUILD_IMAGE=ghcr.io/selkies-project/selkies-gstreamer/py-build:latest
@@ -7,9 +8,16 @@ ARG WEB_IMAGE=ghcr.io/selkies-project/selkies-gstreamer/gst-web:latest
 FROM ${GSTREAMER_BASE_IMAGE}:${GSTREAMER_BASE_IMAGE_RELEASE}-ubuntu${UBUNTU_RELEASE} as selkies-gstreamer
 FROM ${PY_BUILD_IMAGE} as selkies-build
 FROM ${WEB_IMAGE} as selkies-web
+FROM nvcr.io/nvidia/cudagl:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_RELEASE} as cuda
 FROM ubuntu:${UBUNTU_RELEASE}
 
 LABEL maintainer "https://github.com/danisla"
+
+# Install CUDA libraries, required for GPU acceleration with GStreamer to get the cudaconvert plugin.
+COPY --from=cuda /usr/local/cuda/lib64/ /usr/local/cuda/lib64/
+RUN cd /usr/local/cuda/lib64 && ln -s $(ls libnvrtc.so*|head -1) libnvrtc.so && \
+    echo "/usr/local/cuda/lib64" > /etc/ld.so.conf.d/cuda.conf && \
+    ldconfig
 
 # Install Selkies GStreamer system dependencies
 RUN \
@@ -41,7 +49,9 @@ RUN \
         pulseaudio \
         libpulse0 \
         libpangocairo-1.0-0 \
-        libgirepository1.0-dev && \
+        libgirepository1.0-dev \
+        gnupg2 \
+        curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt
@@ -111,6 +121,7 @@ sudo /usr/bin/pulseaudio --daemonize --system --verbose --log-target=file:/tmp/p
 icewm-session &\n\
 export WEBRTC_ENCODER=\${WEBRTC_ENCODER:-x264enc}\n\
 export WEBRTC_ENABLE_RESIZE=\${WEBRTC_ENABLE_RESIZE:-true}\n\
+export NVIDIA_DRIVER_CAPABILITIES=all\n\
 export JSON_CONFIG=/tmp/selkies.json\n\
 echo '{}' > \$JSON_CONFIG\n\
 selkies-gstreamer-resize 1280x720\n\

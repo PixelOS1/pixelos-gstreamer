@@ -23,7 +23,19 @@ A [`coturn`](addons/coturn) and [`coturn-web`](addons/coturn-web) image are also
 Running the docker container built from the [`Dockerfile.example`](./Dockerfile.example):
 
 ```bash
-docker run --name selkies -it --rm -p 8080:8080 ghcr.io/selkies-project/selkies-gstreamer/gst-py-example:latest-ubuntu20.04
+docker run -it --rm --name selkies \
+    -p 8080:8080 \
+    ghcr.io/selkies-project/selkies-gstreamer/gst-py-example:latest-ubuntu20.04
+```
+
+Or, run with NVENC GPU encoder.
+
+```bash
+docker run -it --rm --name selkies \
+    --gpus 'all,"capabilities=compute,graphics,utility,video,display"' \
+    -p 8080:8080 \
+    -e WEBRTC_ENCODER=nvh264enc \
+    ghcr.io/selkies-project/selkies-gstreamer/gst-py-example:latest-ubuntu20.04
 ```
 
 > Now connect to your docker host on port `8080` to access the web interface.

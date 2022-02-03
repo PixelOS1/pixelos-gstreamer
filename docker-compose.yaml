@@ -2,6 +2,8 @@ version: "3.9"
 services:
   dist:
     image: selkies-gstreamer-py-build
+    # Not a service, image required for test service.
+    entrypoint: ["/bin/sh", "-c", "exit 0"]
     build:
       context: .
       dockerfile: Dockerfile
@@ -10,10 +12,15 @@ services:
         PACKAGE_VERSION: 1.0.0-dev
   web:
     image: gst-web
+    # Not a service, image required for test service.
+    entrypoint: ["/bin/sh", "-c", "exit 0"]
     build:
       context: ./addons/gst-web
       dockerfile: Dockerfile
   test:
+    depends_on:
+      - dist
+      - web
     image: selkies-gstreamer-example:latest-ubuntu20.04
     # Uncomment below to use Ubuntu 18.04 image.
     #image: selkies-gstreamer-example:latest-ubuntu18.04
@@ -62,4 +69,3 @@ services:
     # Configure for interactive session
     stdin_open: true
     tty: true
-
