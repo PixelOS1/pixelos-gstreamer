@@ -1,23 +1,16 @@
-# This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0. If a copy of the MPL was not distributed with this
-# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+# Copyright 2019 Google LLC
 #
-# This file incorporates work covered by the following copyright and
-# permission notice:
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#   Copyright 2019 Google LLC
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-#   Licensed under the Apache License, Version 2.0 (the "License");
-#   you may not use this file except in compliance with the License.
-#   You may obtain a copy of the License at
-#
-#        http://www.apache.org/licenses/LICENSE-2.0
-#
-#   Unless required by applicable law or agreed to in writing, software
-#   distributed under the License is distributed on an "AS IS" BASIS,
-#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#   See the License for the specific language governing permissions and
-#   limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from Xlib import display
 from Xlib.ext import xfixes
@@ -32,6 +25,8 @@ import subprocess
 from subprocess import Popen, PIPE, STDOUT
 import socket
 import time
+import stat
+import struct
 from PIL import Image
 
 import logging
@@ -91,12 +86,101 @@ MOUSE_BUTTON_MAP = {
     },
 }
 
+# ---------------------------------------
+# Vpad defines
+# ---------------------------------------
+
+FIFO_PATH = "/tmp/vpad"
+
+# Vpad buttons masks
+VPAD_BUTTON_UP               = 0x0001
+VPAD_BUTTON_DOWN             = 0x0002
+VPAD_BUTTON_LEFT             = 0x0004
+VPAD_BUTTON_RIGHT            = 0x0008
+VPAD_BUTTON_START            = 0x0010
+VPAD_BUTTON_BACK             = 0x0020
+VPAD_BUTTON_LEFT_THUMB       = 0x0040
+VPAD_BUTTON_RIGHT_THUMB      = 0x0080
+VPAD_BUTTON_LEFT_SHOULDER    = 0x0100
+VPAD_BUTTON_RIGHT_SHOULDER   = 0x0200
+VPAD_BUTTON_GUIDE            = 0x0400
+VPAD_BUTTON_A                = 0x1000
+VPAD_BUTTON_B                = 0x2000
+VPAD_BUTTON_Y                = 0x8000
+VPAD_BUTTON_X                = 0x4000
+
+# Vpad events
+VPAD_DUMMY_EVENT = 0
+VPAD_BUTTONS_PRESS = 1
+VPAD_BUTTONS_RELEASE = 2
+VPAD_LEFT_TRIGGER_MOVE = 3
+VPAD_RIGHT_TRIGGER_MOVE = 4
+VPAD_STICK_LX_MOVE = 5
+VPAD_STICK_LY_MOVE = 6
+VPAD_STICK_RX_MOVE = 7
+VPAD_STICK_RY_MOVE = 8
+
+# Vpad mapping
+
+js2vpad_buttons = {
+    304: VPAD_BUTTON_A,
+    305: VPAD_BUTTON_B,
+    308: VPAD_BUTTON_Y,
+    307: VPAD_BUTTON_X,
+    310: VPAD_BUTTON_LEFT_SHOULDER,
+    311: VPAD_BUTTON_RIGHT_SHOULDER,
+    314: VPAD_BUTTON_BACK,
+    315: VPAD_BUTTON_START,
+    316: VPAD_BUTTON_GUIDE,
+    317: VPAD_BUTTON_LEFT_THUMB,
+    318: VPAD_BUTTON_RIGHT_THUMB
+}
+
+js2vpad_axis_st = {
+    0: VPAD_STICK_LX_MOVE,
+    3: VPAD_STICK_RX_MOVE
+}
+
+js2vpad_axis_bw = {
+    1: VPAD_STICK_LY_MOVE,
+    4: VPAD_STICK_RY_MOVE
+}
+
+js2vpad_triggers = {
+    2: VPAD_LEFT_TRIGGER_MOVE,
+    5: VPAD_RIGHT_TRIGGER_MOVE,
+}
+
+ds2vpad_hat = [
+    {
+        -1: VPAD_BUTTON_LEFT,
+        1: VPAD_BUTTON_RIGHT
+    },
+    {
+        -1: VPAD_BUTTON_UP,
+        1: VPAD_BUTTON_DOWN
+    }
+]
+
+# ---------------------------------------
+
+
 class WebRTCInputError(Exception):
     pass
 
 
 class WebRTCInput:
-    def __init__(self, uinput_mouse_socket_path="", uinput_js_socket_path="", enable_clipboard="", enable_cursors=True, cursor_size=24, cursor_debug=False):
+    # Translates [0; 32767] to [0; 255]
+    @staticmethod
+    def vpad_translate_trigger(value):
+        return int(value / 32767 * 255)
+
+    # Translates [-32768; 32767] to [32767; -32768]
+    @staticmethod
+    def vpad_flip_axis(value):
+        return int(-1 - value)
+
+    def __init__(self, uinput_mouse_socket_path="", uinput_js_socket_path="", enable_clipboard="", enable_cursors=True):
         """Initializes WebRTC input instance
         """
         self.clipboard_running = False
@@ -106,20 +190,24 @@ class WebRTCInput:
         self.uinput_js_socket_path = uinput_js_socket_path
         self.uinput_js_socket = None
 
+
         self.enable_clipboard = enable_clipboard
 
         self.enable_cursors = enable_cursors
         self.cursors_running = False
         self.cursor_cache = {}
-        self.cursor_resize_width = cursor_size
-        self.cursor_resize_height = cursor_size
-        self.cursor_debug = cursor_debug
+        self.cursor_resize_width = 24
+        self.cursor_resize_height = 24
+        self.cursor_debug = os.environ.get("DEBUG_CURSORS", "false").lower() == "true"
 
         self.keyboard = None
         self.mouse = None
         self.joystick = None
         self.xdisplay = None
         self.button_mask = 0
+
+        self.vpad_pipe_file = None
+        self.vpad_dpad_last_state = [0, 0]
 
         self.ping_start = None
 
@@ -175,36 +263,64 @@ class WebRTCInput:
 
         Arguments:
             num_axes {integer} -- number of joystick axes
-            num_buttons {integer} -- number of joystick buttons
+            num_buttons {integer} -- number of joystick buttons\
         """
 
-        if self.uinput_js_socket_path:
-            # Proxy uinput joystick commands through unix domain socket
-            logger.info("Connecting to uinput joystick socket: %s" % self.uinput_js_socket_path)
-            self.uinput_js_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        else:
-            logger.info("initializing joystick with %d buttons and %d axes" %
-                        (num_buttons, num_axes))
-            axes = JS_AXES[:min(len(JS_AXES), num_axes)]
-            btns = JS_BTNS[:min(len(JS_BTNS), num_buttons)]
-            self.joystick = uinput.Device(btns + axes,
-                                        vendor=0x045e,
-                                        product=0x028e,
-                                        version=0x110,
-                                        name="Microsoft X-Box 360 pad")
+        if not os.path.exists(FIFO_PATH):
+            logger.error(f"{FIFO_PATH} is not exist!")
+            logger.error("Seems that Vpad DLL side is not running yet")
+            logger.error("Start target application in Wine and try again")
+            raise WebRTCInputError("Unable to initialize Vpad client")
+        
+        if not stat.S_ISFIFO(os.stat(FIFO_PATH).st_mode):
+            logger.error(f"{FIFO_PATH} is not a pipe! Make sure that there is no file with that path")
+            raise WebRTCInputError("Unable to initialize Vpad client")
+
+        self.vpad_pipe_file = open(FIFO_PATH, "wb")
+        logger.info(f"Opened Vpad pipe {FIFO_PATH}")
 
     def __js_disconnect(self):
         if self.joystick:
             del self.joystick
 
-    def __js_emit(self, *args, **kwargs):
-        if self.uinput_js_socket_path:
-            cmd = {"args": args, "kwargs": kwargs}
-            data = msgpack.packb(cmd, use_bin_type=True)
-            self.uinput_js_socket.sendto(data, self.uinput_js_socket_path)
-        else:
-            if self.joystick is not None:
-                self.joystick.emit(*args, **kwargs)
+        if self.vpad_pipe_file:
+            self.vpad_pipe_file.close()
+
+    def __js_vpad_send(self, bytes):
+        self.vpad_pipe_file.write(bytes)
+        self.vpad_pipe_file.flush()
+
+    def __js_emit(self, **kwargs):
+        if not self.vpad_pipe_file:
+            return
+
+        if "btn_num" in kwargs and "btn_on" in kwargs:
+            btn_num = kwargs["btn_num"]
+            btn_on = kwargs["btn_on"]
+            if btn_on:
+                self.__js_vpad_send(struct.pack("iHH", VPAD_BUTTONS_PRESS, js2vpad_buttons[btn_num], 0))
+            else:
+                self.__js_vpad_send(struct.pack("iHH", VPAD_BUTTONS_RELEASE, js2vpad_buttons[btn_num], 0))
+
+        if "axis_num" in kwargs and "axis_val" in kwargs:
+            axis_num = kwargs["axis_num"]
+            axis_val = kwargs["axis_val"]
+
+            if axis_num in js2vpad_axis_st:
+                self.__js_vpad_send(struct.pack("ihH", js2vpad_axis_st[axis_num], axis_val, 0))
+            elif axis_num in js2vpad_axis_bw:
+                self.__js_vpad_send(struct.pack("ihH", js2vpad_axis_bw[axis_num], self.vpad_flip_axis(axis_val), 0))
+            elif axis_num in js2vpad_triggers:
+                self.__js_vpad_send(struct.pack("iBBH", js2vpad_triggers[axis_num], self.vpad_translate_trigger(axis_val), 0, 0))
+            elif axis_num in [16, 17]:
+                # dpad axes   ^^^^^^
+                axis_idx = axis_num - 16
+                if self.vpad_dpad_last_state[axis_idx] != axis_val:
+                    if self.vpad_dpad_last_state[axis_idx] != 0:
+                        self.__js_vpad_send(struct.pack("iHH", VPAD_BUTTONS_RELEASE, ds2vpad_hat[axis_idx][self.vpad_dpad_last_state[axis_idx]], 0))
+                    if axis_val != 0:
+                        self.__js_vpad_send(struct.pack("iHH", VPAD_BUTTONS_PRESS, ds2vpad_hat[axis_idx][axis_val], 0))
+                self.vpad_dpad_last_state[axis_idx] = axis_val
 
     async def connect(self):
         """Connects to X server
@@ -410,6 +526,14 @@ class WebRTCInput:
             if self.xdisplay.query_extension('XFIXES') is None:
                 logger.error('XFIXES extension not supported, cannot watch cursor changes')
                 return
+        # Ensure patched python-xlib with xfixes support is installed.
+        # Remove after this PR is merged:
+        #   https://github.com/python-xlib/python-xlib/pull/218
+        try:
+            assert self.xdisplay.xfixes_select_cursor_input
+        except Exception as e:
+            logger.warning("missing patched python-xlib, remote cursors not available.")
+            return
 
         xfixes_version = self.xdisplay.xfixes_query_version()
         logger.info('Found XFIXES version %s.%s' % (
@@ -425,32 +549,26 @@ class WebRTCInput:
         logger.info("watching for cursor changes")
 
         # Fetch initial cursor
-        try:
-            image = self.xdisplay.xfixes_get_cursor_image(screen.root)
-            self.cursor_cache[image.cursor_serial] = self.cursor_to_msg(image, self.cursor_resize_width, self.cursor_resize_height)
-            self.on_cursor_change(self.cursor_cache[image.cursor_serial])
-        except Exception as e:
-            logger.warning("exception from fetching cursor image: %s" % e)
+        image = self.xdisplay.xfixes_get_cursor_image(screen.root)
+        self.cursor_cache[image.cursor_serial] = self.cursor_to_msg(image, self.cursor_resize_width, self.cursor_resize_height)
+        self.on_cursor_change(self.cursor_cache[image.cursor_serial])
 
         while self.cursors_running:
-            event = self.xdisplay.next_event()
-            if (event.type, 0) == self.xdisplay.extension_event.DisplayCursorNotify:
-                cache_key = event.cursor_serial
+            e = self.xdisplay.next_event()
+            if (e.type, 0) == self.xdisplay.extension_event.DisplayCursorNotify:
+                cache_key = e.cursor_serial
                 if cache_key in self.cursor_cache:
                     if self.cursor_debug:
                         logger.warning("cursor changed to cached serial: {}".format(cache_key))
                 else:
-                    try:
-                        # Request the cursor image.
-                        cursor = self.xdisplay.xfixes_get_cursor_image(screen.root)
+                    # Request the cursor image.
+                    cursor = self.xdisplay.xfixes_get_cursor_image(screen.root)
 
-                        # Convert cursor image and cache.
-                        self.cursor_cache[cache_key] = self.cursor_to_msg(cursor, self.cursor_resize_width, self.cursor_resize_height)
+                    # Convert cursor image and cache.
+                    self.cursor_cache[cache_key] = self.cursor_to_msg(cursor, self.cursor_resize_width, self.cursor_resize_height)
 
-                        if self.cursor_debug:
-                            logger.warning("New cursor: position={},{}, size={}x{}, length={}, xyhot={},{}, cursor_serial={}".format(cursor.x, cursor.y, cursor.width,cursor.height, len(cursor.cursor_image), cursor.xhot, cursor.yhot, cursor.cursor_serial))
-                    except Exception as e:
-                        logger.warning("exception from fetching cursor image: %s" % e)
+                    if self.cursor_debug:
+                        logger.warning("New cursor: position={},{}, size={}x{}, length={}, xyhot={},{}, cursor_serial={}".format(cursor.x, cursor.y, cursor.width,cursor.height, len(cursor.cursor_image), cursor.xhot, cursor.yhot, cursor.cursor_serial))
 
                 self.on_cursor_change(self.cursor_cache.get(cache_key))
 
@@ -581,11 +699,11 @@ class WebRTCInput:
             elif toks[1] == 'b':
                 btn_num = int(toks[2])
                 btn_on = toks[3] == '1'
-                self.__js_emit((uinput.BTN_0[0], btn_num), btn_on)
+                self.__js_emit(btn_num=btn_num, btn_on=btn_on)
             elif toks[1] == 'a':
                 axis_num = int(toks[2])
                 axis_val = int(toks[3])
-                self.__js_emit((uinput.ABS_X[0], axis_num), axis_val)
+                self.__js_emit(axis_num=axis_num, axis_val=axis_val)
             else:
                 logger.warning('unhandled joystick command: %s' % toks[1])
         elif toks[0] == "cr":
